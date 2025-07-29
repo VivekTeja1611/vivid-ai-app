@@ -10,3 +10,4 @@ transformers==4.38.2
 torch>=2.7.1  # Updated to latest stable version
 requests==2.31.0
 numpy==1.26.4  # Explicitly added to prevent conflicts
+unstructured==0.12.2
