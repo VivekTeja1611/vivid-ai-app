@@ -6,18 +6,14 @@ from typing import List, Tuple, Optional
 from dotenv import load_dotenv
 import streamlit as st
 from streamlit_chat import message
-
 from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.schema import Document
-
 from together_chat import TogetherAIChat
-
 # Load environment variables
 load_dotenv()
-
 # Configuration
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 VECTOR_PATH = "vector_store"
@@ -26,7 +22,6 @@ CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 MAX_CONTEXT_LENGTH = 8000
 RETRIEVAL_K = 6
-
 # Initialize components
 @st.cache_resource
 def get_embedding_model():
@@ -36,12 +31,10 @@ def get_embedding_model():
         model_kwargs={'device': 'cpu'},
         encode_kwargs={'normalize_embeddings': True}
     )
-
 @st.cache_resource
 def get_chat_model():
     """Cache the chat model."""
     return TogetherAIChat()
-
 @st.cache_data
 def get_directory_hash(directory: str) -> str:
     """Generate hash of directory contents to detect changes."""
@@ -59,7 +52,6 @@ def get_directory_hash(directory: str) -> str:
     except (IOError, OSError):
         return ""
     return hash_md5.hexdigest()
-
 @st.cache_resource
 def load_or_create_vector_db():
     """Load existing vector DB or create new one with change detection."""
@@ -141,7 +133,6 @@ def load_or_create_vector_db():
     except Exception as e:
         st.error(f"❌ Error creating vector database: {str(e)}")
         return None
-
 def format_context(docs: List[Document], max_length: int = MAX_CONTEXT_LENGTH) -> str:
     """Format retrieved documents with better structure and length control."""
     context_parts = []
@@ -158,7 +149,6 @@ def format_context(docs: List[Document], max_length: int = MAX_CONTEXT_LENGTH) -
         current_length += len(content)
     
     return "\n---\n".join(context_parts)
-
 def get_response_with_context(user_input: str, chat_history: List[Tuple[str, str]]) -> Tuple[str, List[str]]:
     """Generate response with retrieved context and source files."""
     db = st.session_state.get('vector_db')
@@ -193,30 +183,24 @@ def get_response_with_context(user_input: str, chat_history: List[Tuple[str, str
         
         # Enhanced system prompt
         system_prompt = """You are an expert code analyst and software engineer. Your role is to:
-
 1. Analyze the provided code context carefully
 2. Give clear, accurate explanations with specific examples
 3. Reference exact file names and line numbers when possible
 4. Provide actionable insights and suggestions
 5. Use proper formatting with code blocks for better readability
 6. If the context doesn't fully answer the question, clearly state what's missing
-
 Format your response professionally with:
 - Clear headings and structure
 - Code examples in proper markdown
 - Bullet points for lists
 - **Bold** for important concepts"""
-
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"""
 Context from codebase:
 {context}
-
 {f"Recent conversation context: {conversation_context}" if conversation_context else ""}
-
 Current question: {user_input}
-
 Please provide a comprehensive answer based on the code context above."""}
         ]
         
@@ -227,7 +211,6 @@ Please provide a comprehensive answer based on the code context above."""}
         
     except Exception as e:
         return f"❌ Error generating response: {str(e)}", []
-
 # Streamlit Configuration
 st.set_page_config(
     page_title="CodeGPT Assistant",
@@ -235,7 +218,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
 # Custom CSS for modern UI
 st.markdown("""
 <style>
@@ -290,13 +272,11 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
 # Initialize session state
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "vector_db" not in st.session_state:
     st.session_state.vector_db = None
-
 # Header
 st.markdown("""
 <div class="main-header">
@@ -304,7 +284,6 @@ st.markdown("""
     <p>Intelligent Python Codebase Explorer powered by RAG & AI</p>
 </div>
 """, unsafe_allow_html=True)
-
 # Sidebar
 with st.sidebar:
     st.markdown("### 📊 System Status")
@@ -358,10 +337,8 @@ with st.sidebar:
         - 🧠 Conversation memory
         - ⚡ Smart caching
         """)
-
 # Main content area
 col1, col2 = st.columns([2, 1])
-
 with col1:
     st.markdown("### 💬 Chat Interface")
     
@@ -377,7 +354,6 @@ with col1:
     
     # Input
     user_input = st.chat_input("Type your question here...", key="main_input")
-
 with col2:
     st.markdown("### 📈 Session Info")
     
@@ -388,7 +364,6 @@ with col2:
         st.markdown("### 📁 Recent Sources")
         # Show source files from last query (you'd need to track this)
         st.info("Source files will appear here after queries")
-
 # Process user input
 if user_input and st.session_state.vector_db:
     with st.spinner("🤔 Analyzing codebase..."):
@@ -409,10 +384,8 @@ if user_input and st.session_state.vector_db:
             st.caption(f"⏱️ Response time: {response_time:.2f}s")
     
     st.rerun()
-
 elif user_input and not st.session_state.vector_db:
     st.error("❌ Please wait for the vector database to load before asking questions.")
-
 # Footer
 st.markdown("---")
 st.markdown("""
