@@ -380,12 +380,12 @@ def load_or_create_vector_db():
         return None
 
 def format_context(docs: List[Document], max_length: int = MAX_CONTEXT_LENGTH) -> str:
-    """Format retrieved documents with complete code content preservation."""
+    """Format retrieved documents with better structure and complete content preservation."""
     context_parts = []
     current_length = 0
     
-    # Prioritize Python files and README files for code-related queries
-    file_priority = {'python': 0, 'markdown': 1, 'text': 2, 'javascript': 3, 'json': 4, 'yaml': 5}
+    # Sort documents by relevance score if available, then by file type priority
+    file_priority = {'markdown': 0, 'text': 1, 'python': 2, 'javascript': 3, 'json': 4, 'yaml': 5}
     
     sorted_docs = sorted(docs, key=lambda x: (
         file_priority.get(x.metadata.get('file_type', 'unknown'), 10),
@@ -403,19 +403,14 @@ def format_context(docs: List[Document], max_length: int = MAX_CONTEXT_LENGTH) -
         chunk_info = f" (chunk {chunk_index + 1}/{total_chunks})" if total_chunks > 1 else ""
         file_header = f"=== FILE: {relative_path} ({file_type}){chunk_info} ==="
         
-        # For code files, preserve complete content without truncation when possible
-        if file_type == 'python' and len(doc.page_content) < 3000:
-            # Include complete Python files when they're not too large
-            content_block = f"{file_header}\n{doc.page_content}\n{'=' * len(file_header)}\n"
-        else:
-            # Standard formatting for other files
-            content_block = f"{file_header}\n{doc.page_content}\n{'=' * len(file_header)}\n"
+        # Format content with minimal processing to preserve original structure
+        content_block = f"{file_header}\n{doc.page_content}\n{'=' * len(file_header)}\n"
         
-        # Try to fit as much content as possible
         if current_length + len(content_block) > max_length:
+            # If we can't fit the whole chunk, try to fit a partial one
             remaining_space = max_length - current_length - len(file_header) - 100
-            if remaining_space > 500:  # Include more content for better context
-                partial_content = doc.page_content[:remaining_space] + "\n... [Content continues...]"
+            if remaining_space > 200:  # Only include if we have reasonable space
+                partial_content = doc.page_content[:remaining_space] + "\n... [truncated]"
                 content_block = f"{file_header}\n{partial_content}\n{'=' * len(file_header)}\n"
                 context_parts.append(content_block)
             break
@@ -432,28 +427,22 @@ def get_response_with_context(user_input: str, chat_history: List[Tuple[str, str
         return "❌ Vector database not available. Please check your setup.", []
     
     try:
-        # Enhanced retrieval specifically for code files
+        # Enhanced retrieval with better parameters
         retriever = db.as_retriever(
-            search_type="mmr",
+            search_type="mmr",  # Maximal Marginal Relevance for diversity
             search_kwargs={
                 "k": RETRIEVAL_K,
-                "fetch_k": RETRIEVAL_K * 4,  # Fetch even more candidates for code
-                "lambda_mult": 0.3  # Less diversity, more relevance for code
+                "fetch_k": RETRIEVAL_K * 3,  # Fetch more candidates
+                "lambda_mult": 0.5  # More diversity
             }
         )
         
-        # Try multiple search strategies to find the exact code
+        # Also try similarity search as backup
         docs_mmr = retriever.invoke(user_input)
+        docs_similarity = db.similarity_search(user_input, k=RETRIEVAL_K//2)
         
-        # Additional searches for specific file types
-        if any(term in user_input.lower() for term in ['script', 'code', '.py', 'python']):
-            # Search specifically for Python files
-            docs_similarity = db.similarity_search(user_input + " python script code", k=RETRIEVAL_K)
-            docs_python_specific = db.similarity_search("sensor_stream.py download_models.py", k=4)
-            all_docs = docs_mmr + docs_similarity + docs_python_specific
-        else:
-            docs_similarity = db.similarity_search(user_input, k=RETRIEVAL_K//2)
-            all_docs = docs_mmr + docs_similarity
+        # Combine and deduplicate
+        all_docs = docs_mmr + docs_similarity
         seen_content = set()
         unique_docs = []
         
@@ -488,28 +477,23 @@ def get_response_with_context(user_input: str, chat_history: List[Tuple[str, str
             for user_q, assistant_a in recent_history:
                 conversation_context += f"Previous Q: {user_q}\nPrevious A: {assistant_a[:150]}...\n\n"
         
-        # Enhanced system prompt with strict instructions for showing actual code
-        system_prompt = """You are a precise code analyst. Your primary job is to provide actual code and exact information from the provided context.
+        # Enhanced system prompt with strict instructions
+        system_prompt = """You are a precise code analyst. Your primary job is to provide accurate information based EXACTLY on the provided code context.
 
 CRITICAL INSTRUCTIONS:
-1. When asked for Python scripts or code, ALWAYS provide the complete code from the context
-2. If a user asks for "the Python script" or "sensor_stream.py", show the FULL CODE if it's in the context
-3. Base your answers ONLY on the exact content provided in the context
-4. For code requests, format the response as:
-   - Brief explanation
-   - Complete code block with proper syntax highlighting
-   - Any additional notes from the documentation
-5. If the exact file requested isn't in context, clearly state this and show related code that IS available
-6. When showing code, include the complete file content, not just snippets
-7. Use proper markdown code blocks with language specification
-8. Always prioritize showing actual working code over descriptions
+1. Base your answers ONLY on the exact content provided in the context
+2. Quote directly from the code/documentation when possible
+3. If the context doesn't contain the specific information requested, clearly state this
+4. Do NOT make assumptions or add information not present in the context
+5. When discussing README or documentation, reference the EXACT points mentioned
+6. Use the exact terminology, function names, and structure from the provided code
+7. If multiple files are relevant, clearly distinguish information from each file
 
-Response format for code requests:
-- "Here's the [filename] script from your codebase:"
-- ```python
-  [complete code here]
-  ```
-- Additional context or usage instructions if available in the docs"""
+Response format:
+- Start with the most relevant information
+- Use direct quotes when appropriate: "According to the README: '[exact quote]'"
+- Reference specific files: "In file `filename.py`..."
+- Be precise about what the code actually does vs what you think it might do"""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -521,7 +505,7 @@ CODEBASE CONTEXT:
 
 USER QUESTION: {user_input}
 
-IMPORTANT: If the user is asking for a Python script, code, or specific file, provide the COMPLETE CODE from the context. Show the full working script, not just a description of it. If the exact file isn't available, show the closest related code that IS in the context."""}
+Provide a precise answer based strictly on the provided context. If the context doesn't fully address the question, explicitly state what information is missing."""}
         ]
         
         chat_model = get_chat_model()
