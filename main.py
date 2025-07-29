@@ -6,22 +6,106 @@ from typing import List, Tuple, Optional
 from dotenv import load_dotenv
 import streamlit as st
 from streamlit_chat import message
+
 from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.schema import Document
+
 from together_chat import TogetherAIChat
+
 # Load environment variables
 load_dotenv()
+
 # Configuration
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 VECTOR_PATH = "vector_store"
 DOCS_PATH = "Vivid"
-CHUNK_SIZE = 1200
-CHUNK_OVERLAP = 150
-MAX_CONTEXT_LENGTH = 8000
-RETRIEVAL_K = 6
+CHUNK_SIZE = 800  # Reduced for better granularity
+CHUNK_OVERLAP = 100  # Reduced overlap
+MAX_CONTEXT_LENGTH = 12000  # Increased context length
+RETRIEVAL_K = 8  # Increased retrieval count
+
+# File types to include in vector store
+SUPPORTED_EXTENSIONS = {
+    # Code files
+    '.py': 'python',
+    '.js': 'javascript', 
+    '.jsx': 'javascript',
+    '.ts': 'typescript',
+    '.tsx': 'typescript',
+    '.java': 'java',
+    '.cpp': 'cpp',
+    '.c': 'c',
+    '.h': 'c',
+    '.cs': 'csharp',
+    '.php': 'php',
+    '.rb': 'ruby',
+    '.go': 'go',
+    '.rs': 'rust',
+    '.swift': 'swift',
+    '.kt': 'kotlin',
+    '.scala': 'scala',
+    '.r': 'r',
+    '.sql': 'sql',
+    '.sh': 'bash',
+    '.bat': 'batch',
+    '.ps1': 'powershell',
+    
+    # Documentation files
+    '.md': 'markdown',
+    '.txt': 'text',
+    '.rst': 'restructuredtext',
+    '.tex': 'latex',
+    '.org': 'org',
+    
+    # Configuration files
+    '.json': 'json',
+    '.yaml': 'yaml',
+    '.yml': 'yaml',
+    '.toml': 'toml',
+    '.ini': 'ini',
+    '.cfg': 'ini',
+    '.conf': 'ini',
+    '.xml': 'xml',
+    '.html': 'html',
+    '.htm': 'html',
+    '.css': 'css',
+    '.scss': 'scss',
+    '.sass': 'sass',
+    '.less': 'less',
+    
+    # Data files
+    '.csv': 'csv',
+    '.tsv': 'csv',
+    
+    # Docker and deployment
+    'dockerfile': 'dockerfile',
+    '.dockerfile': 'dockerfile',
+    'docker-compose.yml': 'yaml',
+    'docker-compose.yaml': 'yaml',
+    
+    # Other important files
+    'makefile': 'makefile',
+    'cmakelist.txt': 'cmake',
+    'requirements.txt': 'text',
+    'pipfile': 'toml',
+    'poetry.lock': 'toml',
+    'package.json': 'json',
+    'yarn.lock': 'text',
+    'gemfile': 'ruby',
+    'cargo.toml': 'toml',
+    '.gitignore': 'text',
+    '.env': 'text',
+    'license': 'text',
+    'readme': 'text',
+    'changelog': 'text',
+    'contributing': 'text',
+    'authors': 'text',
+    'contributors': 'text'
+}
+
 # Initialize components
 @st.cache_resource
 def get_embedding_model():
@@ -31,27 +115,182 @@ def get_embedding_model():
         model_kwargs={'device': 'cpu'},
         encode_kwargs={'normalize_embeddings': True}
     )
+
 @st.cache_resource
 def get_chat_model():
     """Cache the chat model."""
     return TogetherAIChat()
+
+def is_supported_file(filename: str) -> bool:
+    """Check if file is supported based on extension or special names."""
+    filename_lower = filename.lower()
+    
+    # Check special filenames (README, LICENSE, etc.)
+    special_names = ['readme', 'license', 'changelog', 'contributing', 'authors', 
+                    'contributors', 'makefile', 'dockerfile', 'pipfile', 'gemfile']
+    
+    for special in special_names:
+        if filename_lower.startswith(special):
+            return True
+    
+    # Check extensions
+    for ext in SUPPORTED_EXTENSIONS:
+        if filename_lower.endswith(ext):
+            return True
+    
+    # Check files without extensions that might be important
+    if '.' not in filename and filename_lower in ['dockerfile', 'makefile', 'license', 'readme']:
+        return True
+    
+    return False
+
+def get_file_language(filename: str) -> str:
+    """Get the language/type of a file for better processing."""
+    filename_lower = filename.lower()
+    
+    # Check special filenames first
+    special_mappings = {
+        'readme': 'markdown',
+        'license': 'text', 
+        'changelog': 'markdown',
+        'contributing': 'markdown',
+        'authors': 'text',
+        'contributors': 'text',
+        'makefile': 'makefile',
+        'dockerfile': 'dockerfile',
+        'pipfile': 'toml',
+        'gemfile': 'ruby'
+    }
+    
+    for special, lang in special_mappings.items():
+        if filename_lower.startswith(special):
+            return lang
+    
+    # Check extensions
+    for ext, lang in SUPPORTED_EXTENSIONS.items():
+        if filename_lower.endswith(ext):
+            return lang
+    
+    return 'text'
+
 @st.cache_data
 def get_directory_hash(directory: str) -> str:
     """Generate hash of directory contents to detect changes."""
     hash_md5 = hashlib.md5()
     try:
         for root, dirs, files in os.walk(directory):
+            # Skip hidden directories and common ignore patterns
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules', '.git']]
+            
             for file in sorted(files):
-                if file.endswith('.py'):
+                if is_supported_file(file):
                     filepath = os.path.join(root, file)
                     try:
                         with open(filepath, 'rb') as f:
                             hash_md5.update(f.read())
-                    except (IOError, OSError):
+                    except (IOError, OSError, UnicodeDecodeError):
                         continue
     except (IOError, OSError):
         return ""
     return hash_md5.hexdigest()
+
+def load_documents_from_directory(directory: str) -> List[Document]:
+    """Load all supported documents from directory with enhanced metadata."""
+    documents = []
+    
+    if not os.path.exists(directory):
+        st.error(f"❌ Directory '{directory}' not found!")
+        return documents
+    
+    file_count_by_type = {}
+    
+    for root, dirs, files in os.walk(directory):
+        # Skip hidden directories and common ignore patterns
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules', '.git', 'venv', 'env']]
+        
+        for file in files:
+            if not is_supported_file(file):
+                continue
+                
+            filepath = os.path.join(root, file)
+            relative_path = os.path.relpath(filepath, directory)
+            file_lang = get_file_language(file)
+            
+            # Count files by type for stats
+            file_count_by_type[file_lang] = file_count_by_type.get(file_lang, 0) + 1
+            
+            try:
+                # Try to read file with different encodings
+                content = None
+                encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+                
+                for encoding in encodings:
+                    try:
+                        with open(filepath, 'r', encoding=encoding) as f:
+                            content = f.read()
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if content is None:
+                    st.warning(f"⚠️ Could not read file: {relative_path}")
+                    continue
+                
+                # Skip empty files
+                if not content.strip():
+                    continue
+                
+                # Create document with enhanced metadata
+                doc = Document(
+                    page_content=content,
+                    metadata={
+                        'source': filepath,
+                        'relative_path': relative_path,
+                        'file_name': file,
+                        'file_type': file_lang,
+                        'file_size': len(content),
+                        'directory': os.path.dirname(relative_path) or 'root'
+                    }
+                )
+                documents.append(doc)
+                
+            except Exception as e:
+                st.warning(f"⚠️ Error reading {relative_path}: {str(e)}")
+                continue
+    
+    # Display file type statistics
+    if file_count_by_type:
+        st.info(f"📁 Found files: {dict(sorted(file_count_by_type.items()))}")
+    
+    return documents
+
+def get_text_splitter_for_type(file_type: str) -> RecursiveCharacterTextSplitter:
+    """Get appropriate text splitter based on file type with better preservation."""
+    
+    # Define separators for different file types - more conservative splitting
+    separators_map = {
+        'python': ["\n\nclass ", "\n\ndef ", "\n\nasync def ", "\n\nif __name__", "\n\n# ", "\n\n", "\n", " "],
+        'javascript': ["\n\nfunction ", "\n\nconst ", "\n\nlet ", "\n\nvar ", "\n\nclass ", "\n\n// ", "\n\n", "\n", " "],
+        'typescript': ["\n\nfunction ", "\n\nconst ", "\n\nlet ", "\n\nvar ", "\n\nclass ", "\n\ninterface ", "\n\ntype ", "\n\n// ", "\n\n", "\n", " "],
+        'java': ["\n\npublic class ", "\n\nclass ", "\n\npublic ", "\n\nprivate ", "\n\nprotected ", "\n\n// ", "\n\n", "\n", " "],
+        'markdown': ["\n\n## ", "\n\n### ", "\n\n#### ", "\n\n- ", "\n\n* ", "\n\n", "\n", " "],
+        'text': ["\n\n", "\n", ". ", " "],
+        'json': ["},\n", "}\n", "\n", " "],
+        'yaml': ["\n\n", "\n- ", "\n", " "],
+        'html': ["\n\n<div", "\n\n<section", "\n\n<article", "\n\n", "\n", " "],
+        'css': ["\n\n.", "\n\n#", "\n\n@", "\n\n", "\n", " "]
+    }
+    
+    separators = separators_map.get(file_type, ["\n\n", "\n", ". ", " "])
+    
+    return RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=separators,
+        keep_separator=True,
+        length_function=len
+    )
+
 @st.cache_resource
 def load_or_create_vector_db():
     """Load existing vector DB or create new one with change detection."""
@@ -80,37 +319,43 @@ def load_or_create_vector_db():
         return None
     
     try:
-        loader = DirectoryLoader(
-            DOCS_PATH, 
-            glob="**/*.py",
-            show_progress=True,
-            use_multithreading=True
-        )
-        docs = loader.load()
+        # Load all supported documents
+        docs = load_documents_from_directory(DOCS_PATH)
         
         if not docs:
-            st.warning(f"⚠️ No Python files found in '{DOCS_PATH}'")
+            st.warning(f"⚠️ No supported files found in '{DOCS_PATH}'")
             return None
         
-        # Enhanced text splitter
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
-            separators=["\n\nclass ", "\n\ndef ", "\n\n", "\n", " ", ""],
-            keep_separator=True
-        )
+        st.success(f"📚 Loaded {len(docs)} files from codebase")
         
-        # Add metadata to chunks
+        # Process documents by file type for better chunking
         enhanced_docs = []
+        file_type_counts = {}
+        
         for doc in docs:
+            file_type = doc.metadata.get('file_type', 'text')
+            file_type_counts[file_type] = file_type_counts.get(file_type, 0) + 1
+            
+            # Get appropriate splitter for this file type
+            splitter = get_text_splitter_for_type(file_type)
             chunks = splitter.split_documents([doc])
-            for chunk in chunks:
+            
+            # Enhance chunk metadata
+            for i, chunk in enumerate(chunks):
                 chunk.metadata.update({
-                    'file_name': Path(doc.metadata['source']).name,
-                    'file_path': doc.metadata['source'],
-                    'chunk_size': len(chunk.page_content)
+                    'chunk_index': i,
+                    'total_chunks': len(chunks),
+                    'chunk_size': len(chunk.page_content),
+                    'file_type': file_type
                 })
                 enhanced_docs.append(chunk)
+        
+        # Display processing statistics
+        st.info(f"📊 Processing {len(enhanced_docs)} chunks from {len(docs)} files")
+        
+        # Show file type breakdown
+        type_breakdown = ", ".join([f"{k}: {v}" for k, v in sorted(file_type_counts.items())])
+        st.caption(f"File types: {type_breakdown}")
         
         # Create vector store
         progress_bar = st.progress(0)
@@ -133,22 +378,53 @@ def load_or_create_vector_db():
     except Exception as e:
         st.error(f"❌ Error creating vector database: {str(e)}")
         return None
+
 def format_context(docs: List[Document], max_length: int = MAX_CONTEXT_LENGTH) -> str:
-    """Format retrieved documents with better structure and length control."""
+    """Format retrieved documents with complete code content preservation."""
     context_parts = []
     current_length = 0
     
-    for i, doc in enumerate(docs):
-        file_info = f"📁 {doc.metadata.get('file_name', 'Unknown file')}"
-        content = f"{file_info}\n```python\n{doc.page_content}\n```\n"
+    # Prioritize Python files and README files for code-related queries
+    file_priority = {'python': 0, 'markdown': 1, 'text': 2, 'javascript': 3, 'json': 4, 'yaml': 5}
+    
+    sorted_docs = sorted(docs, key=lambda x: (
+        file_priority.get(x.metadata.get('file_type', 'unknown'), 10),
+        -len(x.page_content)  # Prefer longer, more complete chunks
+    ))
+    
+    for i, doc in enumerate(sorted_docs):
+        file_name = doc.metadata.get('file_name', 'Unknown file')
+        file_type = doc.metadata.get('file_type', 'text')
+        relative_path = doc.metadata.get('relative_path', file_name)
+        chunk_index = doc.metadata.get('chunk_index', 0)
+        total_chunks = doc.metadata.get('total_chunks', 1)
         
-        if current_length + len(content) > max_length:
+        # Create comprehensive file header
+        chunk_info = f" (chunk {chunk_index + 1}/{total_chunks})" if total_chunks > 1 else ""
+        file_header = f"=== FILE: {relative_path} ({file_type}){chunk_info} ==="
+        
+        # For code files, preserve complete content without truncation when possible
+        if file_type == 'python' and len(doc.page_content) < 3000:
+            # Include complete Python files when they're not too large
+            content_block = f"{file_header}\n{doc.page_content}\n{'=' * len(file_header)}\n"
+        else:
+            # Standard formatting for other files
+            content_block = f"{file_header}\n{doc.page_content}\n{'=' * len(file_header)}\n"
+        
+        # Try to fit as much content as possible
+        if current_length + len(content_block) > max_length:
+            remaining_space = max_length - current_length - len(file_header) - 100
+            if remaining_space > 500:  # Include more content for better context
+                partial_content = doc.page_content[:remaining_space] + "\n... [Content continues...]"
+                content_block = f"{file_header}\n{partial_content}\n{'=' * len(file_header)}\n"
+                context_parts.append(content_block)
             break
             
-        context_parts.append(content)
-        current_length += len(content)
+        context_parts.append(content_block)
+        current_length += len(content_block)
     
-    return "\n---\n".join(context_parts)
+    return "\n".join(context_parts)
+
 def get_response_with_context(user_input: str, chat_history: List[Tuple[str, str]]) -> Tuple[str, List[str]]:
     """Generate response with retrieved context and source files."""
     db = st.session_state.get('vector_db')
@@ -156,52 +432,96 @@ def get_response_with_context(user_input: str, chat_history: List[Tuple[str, str
         return "❌ Vector database not available. Please check your setup.", []
     
     try:
-        # Retrieve relevant documents
+        # Enhanced retrieval specifically for code files
         retriever = db.as_retriever(
-            search_type="mmr",  # Maximal Marginal Relevance for diversity
+            search_type="mmr",
             search_kwargs={
                 "k": RETRIEVAL_K,
-                "fetch_k": RETRIEVAL_K * 2,
-                "lambda_mult": 0.7
+                "fetch_k": RETRIEVAL_K * 4,  # Fetch even more candidates for code
+                "lambda_mult": 0.3  # Less diversity, more relevance for code
             }
         )
         
-        docs = retriever.invoke(user_input)
+        # Try multiple search strategies to find the exact code
+        docs_mmr = retriever.invoke(user_input)
+        
+        # Additional searches for specific file types
+        if any(term in user_input.lower() for term in ['script', 'code', '.py', 'python']):
+            # Search specifically for Python files
+            docs_similarity = db.similarity_search(user_input + " python script code", k=RETRIEVAL_K)
+            docs_python_specific = db.similarity_search("sensor_stream.py download_models.py", k=4)
+            all_docs = docs_mmr + docs_similarity + docs_python_specific
+        else:
+            docs_similarity = db.similarity_search(user_input, k=RETRIEVAL_K//2)
+            all_docs = docs_mmr + docs_similarity
+        seen_content = set()
+        unique_docs = []
+        
+        for doc in all_docs:
+            content_hash = hashlib.md5(doc.page_content.encode()).hexdigest()
+            if content_hash not in seen_content:
+                seen_content.add(content_hash)
+                unique_docs.append(doc)
+        
+        docs = unique_docs[:RETRIEVAL_K]
         
         if not docs:
             return "🤔 I couldn't find relevant code for your question. Try rephrasing or asking about specific files/functions.", []
         
         context = format_context(docs)
-        source_files = list(set([doc.metadata.get('file_name', 'Unknown') for doc in docs]))
+        source_files = []
         
-        # Build conversation context
+        # Enhanced source file information
+        for doc in docs:
+            file_info = {
+                'name': doc.metadata.get('file_name', 'Unknown'),
+                'path': doc.metadata.get('relative_path', 'Unknown'),
+                'type': doc.metadata.get('file_type', 'unknown')
+            }
+            if file_info not in source_files:
+                source_files.append(file_info)
+        
+        # Build conversation context (reduced to avoid overwhelming)
         conversation_context = ""
         if chat_history:
-            recent_history = chat_history[-3:]  # Last 3 exchanges
+            recent_history = chat_history[-2:]  # Last 2 exchanges only
             for user_q, assistant_a in recent_history:
-                conversation_context += f"Previous Q: {user_q}\nPrevious A: {assistant_a[:200]}...\n\n"
+                conversation_context += f"Previous Q: {user_q}\nPrevious A: {assistant_a[:150]}...\n\n"
         
-        # Enhanced system prompt
-        system_prompt = """You are an expert code analyst and software engineer. Your role is to:
-1. Analyze the provided code context carefully
-2. Give clear, accurate explanations with specific examples
-3. Reference exact file names and line numbers when possible
-4. Provide actionable insights and suggestions
-5. Use proper formatting with code blocks for better readability
-6. If the context doesn't fully answer the question, clearly state what's missing
-Format your response professionally with:
-- Clear headings and structure
-- Code examples in proper markdown
-- Bullet points for lists
-- **Bold** for important concepts"""
+        # Enhanced system prompt with strict instructions for showing actual code
+        system_prompt = """You are a precise code analyst. Your primary job is to provide actual code and exact information from the provided context.
+
+CRITICAL INSTRUCTIONS:
+1. When asked for Python scripts or code, ALWAYS provide the complete code from the context
+2. If a user asks for "the Python script" or "sensor_stream.py", show the FULL CODE if it's in the context
+3. Base your answers ONLY on the exact content provided in the context
+4. For code requests, format the response as:
+   - Brief explanation
+   - Complete code block with proper syntax highlighting
+   - Any additional notes from the documentation
+5. If the exact file requested isn't in context, clearly state this and show related code that IS available
+6. When showing code, include the complete file content, not just snippets
+7. Use proper markdown code blocks with language specification
+8. Always prioritize showing actual working code over descriptions
+
+Response format for code requests:
+- "Here's the [filename] script from your codebase:"
+- ```python
+  [complete code here]
+  ```
+- Additional context or usage instructions if available in the docs"""
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"""
-Context from codebase:
+CODEBASE CONTEXT:
 {context}
-{f"Recent conversation context: {conversation_context}" if conversation_context else ""}
-Current question: {user_input}
-Please provide a comprehensive answer based on the code context above."""}
+
+{f"RECENT CONVERSATION:\n{conversation_context}" if conversation_context else ""}
+
+USER QUESTION: {user_input}
+
+IMPORTANT: If the user is asking for a Python script, code, or specific file, provide the COMPLETE CODE from the context. Show the full working script, not just a description of it. If the exact file isn't available, show the closest related code that IS in the context."""}
         ]
         
         chat_model = get_chat_model()
@@ -211,6 +531,7 @@ Please provide a comprehensive answer based on the code context above."""}
         
     except Exception as e:
         return f"❌ Error generating response: {str(e)}", []
+
 # Streamlit Configuration
 st.set_page_config(
     page_title="CodeGPT Assistant",
@@ -218,6 +539,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 # Custom CSS for modern UI
 st.markdown("""
 <style>
@@ -272,11 +594,13 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
 # Initialize session state
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "vector_db" not in st.session_state:
     st.session_state.vector_db = None
+
 # Header
 st.markdown("""
 <div class="main-header">
@@ -284,6 +608,7 @@ st.markdown("""
     <p>Intelligent Python Codebase Explorer powered by RAG & AI</p>
 </div>
 """, unsafe_allow_html=True)
+
 # Sidebar
 with st.sidebar:
     st.markdown("### 📊 System Status")
@@ -326,19 +651,22 @@ with st.sidebar:
     with st.expander("💡 Usage Tips"):
         st.markdown("""
         **Good Questions:**
-        - "Explain the authentication flow"
-        - "How is data validation handled?"
-        - "Show me the API endpoints"
-        - "What design patterns are used?"
+        - "What exactly does the README say about installation?"
+        - "Show me the exact authentication flow from the code"
+        - "List the exact API endpoints defined"
+        - "What are the specific features mentioned in documentation?"
         
         **Features:**
         - 🔍 Semantic code search
         - 📁 Multi-file context
         - 🧠 Conversation memory
         - ⚡ Smart caching
+        - 🎯 Exact content matching
         """)
+
 # Main content area
 col1, col2 = st.columns([2, 1])
+
 with col1:
     st.markdown("### 💬 Chat Interface")
     
@@ -350,10 +678,11 @@ with col1:
                 message(user_msg, is_user=True, key=f"user_{i}")
                 message(bot_msg, is_user=False, key=f"bot_{i}")
     else:
-        st.info("👋 Ask me anything about your Python codebase!")
+        st.info("👋 Ask me anything about your Python codebase! I'll provide exact information from your files.")
     
     # Input
     user_input = st.chat_input("Type your question here...", key="main_input")
+
 with col2:
     st.markdown("### 📈 Session Info")
     
@@ -362,8 +691,11 @@ with col2:
     
     if st.session_state.chat_history:
         st.markdown("### 📁 Recent Sources")
-        # Show source files from last query (you'd need to track this)
-        st.info("Source files will appear here after queries")
+        # Show source files from last query
+        if hasattr(st.session_state, 'last_sources'):
+            for source in st.session_state.last_sources[:3]:
+                st.markdown(f"📄 `{source['path']}`")
+
 # Process user input
 if user_input and st.session_state.vector_db:
     with st.spinner("🤔 Analyzing codebase..."):
@@ -373,19 +705,22 @@ if user_input and st.session_state.vector_db:
     
     # Add to chat history
     st.session_state.chat_history.append((user_input, response))
+    st.session_state.last_sources = source_files
     
     # Show source files
     if source_files:
         with col2:
             st.markdown("### 📁 Sources Used")
             for file in source_files[:5]:  # Show top 5
-                st.markdown(f"📄 `{file}`")
+                st.markdown(f"📄 `{file['path']}` ({file['type']})")
             
             st.caption(f"⏱️ Response time: {response_time:.2f}s")
     
     st.rerun()
+
 elif user_input and not st.session_state.vector_db:
     st.error("❌ Please wait for the vector database to load before asking questions.")
+
 # Footer
 st.markdown("---")
 st.markdown("""
