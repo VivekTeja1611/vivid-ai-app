@@ -2,10 +2,11 @@ streamlit==1.35.0
 streamlit-chat==0.1.1
 langchain==0.2.0
 langchain-community==0.2.0
-faiss-cpu>=1.7.3
+faiss-cpu==1.7.3  # Pinned to version with known wheels
 python-dotenv==1.0.1
 tqdm==4.66.4
 sentence-transformers==2.7.0
-transformers>=4.43.2
-torch>=2.0.0
+transformers==4.38.2  # Version known to be stable
+torch==2.2.1  # Specific stable version
 requests==2.31.0
+numpy==1.26.4  # Explicitly added to prevent conflicts
